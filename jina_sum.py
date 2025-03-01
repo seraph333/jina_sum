@@ -12,6 +12,10 @@ from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from common.log import logger
 from plugins import *
+import re
+import requests
+import time
+from requests.exceptions import RequestException
 
 @plugins.register(
     name="JinaSum",
@@ -182,6 +186,9 @@ class JinaSum(Plugin):
                 logger.error(f"[JinaSum] Failed to get content from jina reader: {str(e)}")
                 raise
             
+            # 过滤掉图片标记
+            target_url_content = re.sub(r'!\[.*?\]\(.*?\)', '', target_url_content)
+        
             # 限制内容长度
             target_url_content = target_url_content[:self.max_words]
             logger.debug(f"[JinaSum] Got content length: {len(target_url_content)}")
@@ -218,6 +225,33 @@ class JinaSum(Plugin):
             reply = Reply(ReplyType.ERROR, f"无法获取该内容: {str(e)}")
             e_context["reply"] = reply
             e_context.action = EventAction.BREAK_PASS
+
+    def fetch_data_with_retry(url, max_retries=3, backoff_factor=0.5):
+        """带重试机制的请求函数"""
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()  # 检查HTTP状态码
+                return response.json()  # 尝试解析JSON
+            except RequestException as e:
+                if attempt == max_retries - 1:  # 最后一次重试仍然失败
+                    raise  # 抛出异常
+                else:
+                    wait_time = backoff_factor * (2 ** attempt)  # 指数退避
+                    time.sleep(wait_time)
+                    continue
+        return None
+    
+    def handle_request(url):
+        """处理请求并返回结果"""
+        try:
+            data = fetch_data_with_retry(url)
+            return data
+        except RequestException as e:
+            # 记录错误日志
+            logger.error(f"Failed to fetch data from {url}: {str(e)}")
+            # 返回友好的错误信息
+            return {"error": "暂时无法处理您的请求，请稍后重试~"}
 
     def _process_question(self, question: str, chat_id: str, e_context: EventContext, retry_count: int = 0):
         """处理用户提问"""
@@ -301,7 +335,8 @@ class JinaSum(Plugin):
             logger.exception(e)
 
     def _get_jina_url(self, target_url):
-        return self.jina_reader_base + "/" + target_url
+    # 添加参数 exclude_images=1 来排除图片内容（无效）
+        return f"{self.jina_reader_base}/{target_url}?exclude_images=1"
 
     def _get_openai_chat_url(self):
         return self.open_ai_api_base + "/chat/completions"
